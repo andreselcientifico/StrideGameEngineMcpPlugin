@@ -257,6 +257,27 @@ user first if they have unsaved changes (the reload may prompt).
 - `Quaternion.RotationYawPitchRoll` takes **radians**; the dedicated
   `set_entity_transform` tool takes degrees.
 
+### Game assembly serialization gotchas (verified 2026-10-18)
+
+1. **Entity components that live in scenes need `[DataContract]`** (from
+   `Stride.Core`). Plain `EntityComponent` subclasses without it get NO
+   generated `DataSerializer` from the AssemblyProcessor → any
+   undo/`AssetCloner` path hits `ArgumentException: No serializer available
+   for type X` and can crash Game Studio. Script components
+   (`SyncScript`/`StartupScript`) are auto-covered; raw data components are
+   NOT. Empirical check: scan the built dll bytes for `<TypeName>Serializer`.
+2. **Game Studio can deploy a STALE game dll.** `Bin\Windows\Debug\nose.Game.dll`
+   (what the editor loads) was an old copy while
+   `nose.Game\bin\Debug\net10.0\...` (dotnet CLI build) was newer with the
+   serializer. When "No serializer available" appears on solution open,
+   byte-compare both dlls and clean `obj`/`bin`/`Bin` folders to force a
+   full rebuild, then relaunch Game Studio.
+3. `Start-StrideWithMcp.ps1` now auto-detects the user's real Documents
+   folder (`[Environment]::GetFolderPath('MyDocuments')`) + `/Stride Projects`
+   as default `.slnx` search roots, always prompts (menu / other root /
+   external path), and defaults the Game Studio exe to the NuGet cache
+   path.
+
 ### What the dedicated tools cannot do (verified gaps)
 
 - No `delete_entity`, no scene save, no game launch, no asset creation.
