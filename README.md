@@ -1,5 +1,9 @@
 # Stride MCP
 
+This project is licensed under the [MIT License](LICENSE). You may use,
+modify, and redistribute it, including as one of its creators, subject to
+the license terms.
+
 Stride MCP follows the same split used by Blender integrations: an editor-side
 plugin exposes a loopback TCP bridge, while a separate MCP process communicates
 with AI clients over standard input/output (stdio). A .NET startup hook loads
