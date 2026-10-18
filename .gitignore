@@ -1,0 +1,27 @@
+# .NET build output
+**/bin/
+**/obj/
+**/TestResults/
+**/artifacts/
+
+# IDE state
+.vs/
+.idea/
+.vscode/*
+!.vscode/mcp.json
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Generated and diagnostic files
+*.log
+*.cache
+*.tmp
+*.pidb
+*.svclog
+project.lock.json
+
+
+# Scripts
+Scripts/

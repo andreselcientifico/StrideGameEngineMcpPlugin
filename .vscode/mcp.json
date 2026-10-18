@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "stride": {
+      "type": "stdio",
+      "command": "dotnet",
+      "args": [
+        "${workspaceFolder}\\StrideMcpServer\\bin\\Debug\\net10.0-opencode-entities\\StrideMcpServer.dll"
+      ]
+    }
+  }
+}
