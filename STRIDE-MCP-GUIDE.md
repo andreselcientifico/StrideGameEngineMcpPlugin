@@ -260,16 +260,173 @@ user first if they have unsaved changes (the reload may prompt).
 ### What the dedicated tools cannot do (verified gaps)
 
 - No `delete_entity`, no scene save, no game launch, no asset creation.
-- `ModelComponent.Materials` is read-only (`IndexingDictionary`); bake
-  materials into model assets instead.
-- Custom vertex meshes (real heightmap terrain) require a `GraphicsDevice`;
-  procedural model assets are the practical alternative.
+- `ModelComponent.Materials` is an `IndexingDictionary<Material>`: you cannot
+  add/remove from a design script, but the indexer assignment
+  `modelComponent.Materials[0] = material` **works fine in a runtime game
+  script** (used to re-bind the terrain material after replacing the Model).
+- Static design-time meshes come from procedural model assets (above), but a
+  full deformed terrain is possible at RUNTIME — see the next section.
+
+### Runtime deformed terrain — the `SaltDuneTerrain` pattern (fully working)
+
+For terrain that the character can actually walk on, generate the mesh in a
+game `StartupScript` and rebuild the collider from the same vertex data. The
+working implementation lives at
+`D:\Documentos\Stride Projects\nose\nose.Game\SaltDuneTerrain.cs`
+(attached to the "desierto de sal" entity in MainScene). Verified working:
+visuals + collision + normal-mapped salt material. Key lessons, each learned
+by reading Stride 4.4.1 source on GitHub (sources/engine/...):
+
+Building the mesh:
+
+```csharp
+var vb = Stride.Graphics.Buffer.New(graphics, (TerrainVertex[])vertices,
+    BufferFlags.VertexBuffer, GraphicsResourceUsage.Immutable); // NOT ".Static"
+var ib = Stride.Graphics.Buffer.New(graphics, (int[])indices,
+    BufferFlags.IndexBuffer, GraphicsResourceUsage.Immutable);
+var draw = new MeshDraw {
+    PrimitiveType = PrimitiveType.TriangleList,
+    VertexBuffers = new[] { new VertexBufferBinding(vb, TerrainVertex.Layout, vertexCount) },
+    IndexBuffer = new IndexBufferBinding(ib, true, indexCount),
+    DrawCount = indexCount,
+};
+var mesh = new Mesh { Draw = draw, MaterialIndex = 0, BoundingBox = ... };
+var model = new Model(); model.Meshes.Add(mesh); modelComponent.Model = model;
+```
+
+- `Buffer.New<T>` with 3 args is ambiguous → pass `GraphicsResourceUsage`
+  explicitly; the correct member is `Immutable` (there is NO `.Static`).
+- Custom vertex struct: implement `IVertex` (`VertexDeclaration GetLayout()`,
+  `void FlipWinding()`), mark `[StructLayout(LayoutKind.Sequential, Pack=4)]`
+  (fully qualify the attribute or add the using), declare
+  `public static readonly VertexDeclaration Layout = new VertexDeclaration(
+  VertexElement.Position<Vector3>(), VertexElement.Normal<Vector3>(),
+  VertexElement.Tangent<Vector4>(), VertexElement.TextureCoordinate<Vector2>());`.
+- Normal-map materials need the TANGENT semantic. Compute the tangent from the
+  height field: `T = normalize((1, dhdx, 0) - N*dot)` and put the handedness
+  in `Tangent.w` (for U=+X, V=+Z use w = -1 so the shader bitangent aligns
+  with +V). Stride has NO built-in tangent-carrying vertex struct in 4.4.1
+  (`VertexPositionNormalTexture` only has Position/Normal/UV).
+- Triangle winding: copy `GeometricPrimitive.Plane` (UpY) ordering exactly.
+  If wrong, faces are culled and you get black holes.
+- UV: check the MATERIAL's `UVScale` override (e.g. "Desierto de sal" uses
+  ×50). World/6 UVs + ×50 = 12 cm tiles (looks broken). UV 0..1 across the
+  plane + ×50 = ~20 m tiles, matching the original procedural Ground.
+- Materials: capture `modelComponent.Materials[0]` BEFORE replacing
+  `ModelComponent.Model`, then re-assign it after (`Model` setter does not
+  clear the collection, but re-assign anyway to be safe).
+- Logging from game scripts: write to `%LOCALAPPDATA%\stride\<name>-log.txt`
+  with try/catch — readable by the agent after each game run. lifesaver.
+
+Collider — the critical pitfall (verified in `PhysicsComponent.cs` source):
+
+- Setting `collider.ColliderShape = newShape` at runtime swaps
+  `NativeCollisionObject.CollisionShape` but does **NOT refresh the
+  broadphase AABB** → the new mesh never collides with anything (characters
+  fall through/rubberband).
+- The fix that works: copy group/filter/friction, `Entity.Components.Remove(collider)`,
+  create a NEW `StaticColliderComponent { ColliderShape = shape }` and
+  `Entity.Components.Add(...)` — a fresh attach creates a new
+  `CollisionObject` and calls `Simulation.AddCollider` with a correct AABB.
+- `StaticMeshColliderShape(ICollection<Vector3>, ICollection<int>)` builds a
+  `BvhTriangleMeshShape` immediately — no extra steps needed. Bullet triangles
+  are double-sided; winding does not matter for physics.
+- Reset the entity scale to `Vector3.One` first if the scene had it scaled
+  (e.g. ×100), then generate the mesh in world units. Keep a flat spawn pad
+  around the origin (ramp 4→10 m) so characters don't spawn inside a dune.
+- Design-time descriptors stay in the scene; the runtime replace happens in
+  `Start()` (one-entity batch, no editor approval needed since it's game code).
+
+General technique that unlocked all of this: fetch Stride sources directly
+from GitHub (`https://raw.githubusercontent.com/stride3d/stride/master/sources/engine/Stride.X/...`)
+and list paths with the git trees API to find exact file names — every
+runtime API question (Physics, Graphics, Rendering) was answered 100%
+reliably from source instead of guessing.
+
+### Smooth physics-driven characters (Tenkaichi-style combat, verified)
+
+Symptoms: character renders with a forward/backward stutter; camera and
+model "fight". Causes found by reading Stride 4.4.1 source
+(`Bullet2PhysicsSystem.cs`, `Simulation.cs`, `PhysicsProcessor.cs`) and the
+official "fix physics jitter" doc (which only applies to the NEW Bepu
+engine, NOT 4.4.1 Bullet):
+
+1. **No render interpolation in 4.4.1**: Bullet is stepped with
+   `StepSimulation(FixedTimeStep, 0, FixedTimeStep)` (maxSubSteps = 0 =
+   bullet's own interpolation disabled). Transforms are written once per
+   frame in bursts of 0–N ticks → jitter at any render FPS ≠ physics FFT.
+   Partial fix (halves the jitter): add to `GameSettings.sdgamesettings`
+   Defaults:
+   ```yaml
+   - !Stride.Physics.PhysicsSettings,Stride.Physics
+       Flags: None
+       FixedTimeStep: 0.006944444444444444  # 1/144 (default 1/60)
+       MaxTickDuration: 0.005555555555555556  # 1/180
+       Gravity: {X: 0.0, Y: -10.0, Z: 0.0}
+   ```
+2. **`CharacterComponent.Orientation` owns the yaw**: every frame the
+   processor writes entity transform as
+   `RotationQ(Orientation) * PhysicsWorldTransform`
+   (`PhysicsProcessor.UpdateCharacters`). So rotate characters by
+   `character.Orientation = slerp(cur, target, smoothstep)` — NEVER via
+   `Entity.Transform.Rotation`, which the physics overwrites every frame.
+3. **Manual visual interpolation is the real fix** (implemented as
+   `nose.ModelVisualSmoother` in the nose project): the ModelComponent moves
+   to a child entity (`player_visual` under `player`), and a SyncScript on
+   the root follows the chunky physics position with
+   `pos = lerp(pos, rootPos, 1 - exp(-k*dt))`, converting the delta into the
+   root's local space via the root's inverse world matrix; with a 2 m/frame
+   teleport guard. Camera scripts then read the VISUAL child (smooth).
+   Smoothing k≈60 (~16 ms lag) left only a minimal residual shake; k≈90 is
+   tighter.
+4. Physics transform writes happen in `PhysicsProcessor.Draw` and character
+   updates run before scripts (UpdateOrder -1000), so scripts reliably read
+   this frame's freshly written transform.
+
+### Scene-serialization pitfall: entity references MUST go through the node container
+
+NodeContainer/modeling pattern (verified by hard failure): a scene script
+that moves `ModelComponent`s between entities, adds a C# script component
+whose property holds an Entity reference, and assigns references directly on
+the C# component object — then saving — serializes those entity references
+as **inline full copies of the referenced entity** (nested, transitive),
+producing "Multiple identifiable objects with the same id" compilation
+errors (the same entity UUID serialized 3–5× across inline snapshots).
+
+Rules:
+- When writing any property whose value is an Entity of the SAME scene,
+  ALWAYS do it through the Quantum UI property node:
+  `editor.Session.AssetNodeContainer.GetNode(component)["Prop"].Update(value)`
+  — the graph then serializes a `ref!! <guid>` pointer (like `FollowCamera`
+  Target/Enemy after this method — worked first try).
+- Direct C# object assignments / `Components.Add` bypass the pointer
+  registry → inline copies on save. Don't do it for entity references.
+- Repair protocol when a scene is already corrupted on disk (works every
+  time): take a `.bak` copy, convert each inline copy block of an
+  identifiable object into a single `PropName: ref!! <guid>` line (children
+  lists use `key: ref!! <guid>` form), verify every UUID appears exactly
+  once as a definition (`(?m)^\s*Id: <uuid>$` — regex count must be 1),
+  then
+  **trigger a session reload WITHOUT saving in Game Studio first** (the
+  in-memory scene would overwrite the fix) and rebuild.
 
 ### Reusable scripts
 
 `Scripts\` contains the battle-tested scripts: `make_desert.ps1.txt`
 (create entities from procedural assets), `rebuild_desert.ps1.txt`
-(delete + recreate with better layout), `reload_session.ps1.txt`,
+(delete + recreate with better layout), `remove_dune_entities.ps1.txt`
+(delete all `Duna *` entities in one transaction), `reload_session.ps1.txt`,
+`apply_visual_smoothing.ps1.txt` (restructure player/enemy into physics-root
++ visual-child + camera rewire via reflection), `fix_scene_inline_duplicates.ps1`
+(line-precise YAML repair with per-UUID uniqueness verification),
 and several `introspect_*.ps1.txt` / `probe_*.ps1.txt` API discovery
 scripts. Copy and adapt them instead of starting from scratch, and delete
 experimental ones when they stop being useful.
+
+Also useful: pass bridge operation arguments built with PowerShell:
+`(@{ entityName = 'player' } | ConvertTo-Json -Compress)` — avoids the
+doubled-quote JSON corruption of inline `'{""k"":""v""}'` strings.
+
+`Invoke-StrideBuild.ps1` (workspace root) wraps `build_game` over the bridge:
+prints `success=`/`exitCode=`/elapsed and extracts the first `error CS` lines
+on failure — avoids painful PowerShell quoting of `-ArgumentsJson`.
